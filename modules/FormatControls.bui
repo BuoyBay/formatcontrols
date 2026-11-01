@@ -1,0 +1,331 @@
+Import formatkit
+Import temporalkit
+Import settingskit
+Import FieldKit
+Import fieldkit.FieldMasks
+Import maskkit
+Import moneykit
+Import timezonekit
+
+Private Function FormattingRules() As Array Of SettingsRule
+    Dim choices As Array Of String = []
+    Return [ _
+        New SettingsRule("number.preset", "text", "invariant", 1, 32, ["invariant", "system", "comma", "space", "indian"]), _
+        New SettingsRule("language", "text", "en", 1, 64, choices), _
+        New SettingsRule("date.locale", "text", "explicit", 1, 64, choices), _
+        New SettingsRule("currency.code", "text", "USD", 3, 3, choices), _
+        New SettingsRule("currency.digits", "integer", "-1", -1, 4, choices), _
+        New SettingsRule("currency.symbol", "text", "", 0, 16, choices), _
+        New SettingsRule("currency.suffix", "boolean", "false", 0, 0, choices), _
+        New SettingsRule("currency.space", "boolean", "true", 0, 0, choices), _
+        New SettingsRule("number.grouping", "boolean", "true", 0, 0, choices), _
+        New SettingsRule("number.accounting", "boolean", "false", 0, 0, choices), _
+        New SettingsRule("number.minimum", "integer", "0", 0, 15, choices), _
+        New SettingsRule("number.maximum", "integer", "2", 0, 15, choices), _
+        New SettingsRule("number.rounding", "integer", "0", 0, 4, choices), _
+        New SettingsRule("number.decimal", "text", "", 0, 8, choices), _
+        New SettingsRule("number.separator", "text", "", 0, 8, choices), _
+        New SettingsRule("number.primary", "integer", "0", 0, 9, choices), _
+        New SettingsRule("number.secondary", "integer", "0", 0, 9, choices), _
+        New SettingsRule("date.pattern", "text", "yyyy-MM-dd", 1, 128, choices), _
+        New SettingsRule("time.pattern", "text", "HH:mm:ss", 1, 128, choices), _
+        New SettingsRule("time.edit-pattern", "text", "HH:mm:ss.fff", 1, 128, choices), _
+        New SettingsRule("time.zone", "text", "UTC", 1, 128, choices) _
+    ]
+End Function
+
+Private Function FormattingSetting(values As Array Of SettingsPair, key As String) As String
+    For Each pair As SettingsPair In values
+        If String.Compare(pair.Key(), key, True) = 0 Then Return pair.Value()
+    Next
+    Throw New InvalidArgumentException("Missing formatting setting: " + key)
+End Function
+
+Private Function FormattingResolved(values As Array Of SettingsPair) As FormatProfile
+    Dim preset As String = FormattingSetting(values, "number.preset")
+    Dim profile As New FormatProfile()
+    If preset = "system" Then profile = FormatProfile.ResolveSystem()
+    If preset = "comma" Then
+        profile.DecimalSeparator = ","
+        profile.GroupingSeparator = "."
+    ElseIf preset = "space" Then
+        profile.DecimalSeparator = ","
+        profile.GroupingSeparator = " "
+    ElseIf preset = "indian" Then
+        profile.SecondaryGroup = 2
+    End If
+    If preset <> "system" Then
+        profile.NumberLocale = preset
+        profile.Provenance = "explicit-preset:" + preset
+    End If
+    Dim decimalOverride As String = FormattingSetting(values, "number.decimal")
+    Dim groupOverride As String = FormattingSetting(values, "number.separator")
+    If decimalOverride <> "" Then profile.DecimalSeparator = decimalOverride
+    If groupOverride <> "" Then profile.GroupingSeparator = groupOverride
+    Dim primary As Integer = SettingsWire.Number(FormattingSetting(values, "number.primary"))
+    Dim secondary As Integer = SettingsWire.Number(FormattingSetting(values, "number.secondary"))
+    If primary > 0 Then profile.PrimaryGroup = primary
+    If secondary > 0 Then profile.SecondaryGroup = secondary
+    profile.Language = FormattingSetting(values, "language")
+    profile.DateLocale = FormattingSetting(values, "date.locale")
+    profile.CurrencyCode = FormattingSetting(values, "currency.code")
+    profile.CurrencyDigitsOverride = SettingsWire.Number(FormattingSetting(values, "currency.digits"))
+    profile.CurrencySymbolOverride = FormattingSetting(values, "currency.symbol")
+    profile.CurrencySuffix = SettingsWire.Equal(FormattingSetting(values, "currency.suffix"), "true")
+    profile.CurrencySpace = SettingsWire.Equal(FormattingSetting(values, "currency.space"), "true")
+    ' A true preference permits the resolved convention; it must not turn a
+    ' synthetic validation-only separator into a host grouping convention.
+    ' An explicit separator override supplies a caller-owned convention instead.
+    profile.Grouping = SettingsWire.Equal(FormattingSetting(values, "number.grouping"), "true") And (profile.Grouping Or groupOverride <> "")
+    profile.Accounting = SettingsWire.Equal(FormattingSetting(values, "number.accounting"), "true")
+    profile.MinFraction = SettingsWire.Number(FormattingSetting(values, "number.minimum"))
+    profile.MaxFraction = SettingsWire.Number(FormattingSetting(values, "number.maximum"))
+    profile.Rounding = CType(SettingsWire.Number(FormattingSetting(values, "number.rounding")), MoneyRoundingMode)
+    profile.DatePattern = FormattingSetting(values, "date.pattern")
+    profile.TimePattern = FormattingSetting(values, "time.pattern")
+    profile.TimeEditPattern = FormattingSetting(values, "time.edit-pattern")
+    profile.TimeZoneIdentity = FormattingSetting(values, "time.zone")
+    profile.Validate()
+    ' Validate portable patterns and zone identity before publishing preferences.
+    Dim dateText As String = FormatTemporalDate(New TemporalDateOnly(2000, 1, 2), profile.DatePattern)
+    Dim timeText As String = FormatTemporalTime(New TemporalTimeOfDay(0, 0), profile.TimePattern)
+    Dim editText As String = FormatTemporalTime(New TemporalTimeOfDay(13, 4, 5, 123), profile.TimeEditPattern)
+    Dim zone As New NamedTimeZone(profile.TimeZoneIdentity)
+    Return profile
+End Function
+
+Public Class FormattingSettingsSchema Inherits SettingsSchema
+    Public Sub Constructor()
+        Super.Constructor(1, FormattingRules())
+    End Sub
+    Public Overrides Sub Validate(values As Array Of SettingsPair)
+        Dim profile As FormatProfile = FormattingResolved(values)
+    End Sub
+End Class
+
+''' Explicit raw-slot or formatted entry; punctuation is applied on commit.
+Public Class MaskedFieldCodec Implements FieldCodec
+    Private Property mPattern As String
+    Private Property mMask As TextMask
+    Private Property mRawInput As Boolean
+    Public Sub Constructor(pattern As String, rawInput As Boolean)
+        mPattern = pattern
+        mMask = New TextMask(pattern)
+        mRawInput = rawInput
+    End Sub
+    Public Function Analyze(text As String, profile As String) As FieldAnalysis
+        If mPattern <> "" And mMask.SlotCount = 0 Then
+            Dim fixedMatch As MaskMatch = mMask.Format("")
+            If text = "" Or String.Compare(text, fixedMatch.Text, True) = 0 Then Return New FieldAnalysis(FieldState.Valid, Some(""))
+            Return New FieldAnalysis(FieldState.Invalid, None, "mask", 0)
+        End If
+        If text = "" Then Return New FieldAnalysis(FieldState.Empty, None)
+        Dim matched As MaskMatch
+        If mRawInput Then
+            matched = mMask.Format(text)
+        Else
+            matched = mMask.Match(text)
+        End If
+        If Not matched.IsValid Then Return New FieldAnalysis(FieldState.Invalid, None, "mask", matched.ErrorPosition)
+        If Not matched.IsComplete Then Return New FieldAnalysis(FieldState.Incomplete, None, "incomplete", String.Len(text))
+        Dim editor As New MaskEditor(mPattern)
+        Dim caret As Integer = editor.Replace(0, 0, text, Not mRawInput)
+        Return New FieldAnalysis(FieldState.Valid, Some(editor.RawText))
+    End Function
+    Public Function FormatDisplay(canonical As String, profile As String) As String
+        Dim matched As MaskMatch = mMask.Format(canonical)
+        If Not matched.IsComplete Then Throw New InvalidArgumentException("Invalid canonical masked value")
+        Return matched.Text
+    End Function
+    Public Function FormatEdit(canonical As String, profile As String) As String
+        Dim formatted As String = Me.FormatDisplay(canonical, profile)
+        If mRawInput And mMask.SlotCount > 0 Then Return canonical
+        Return formatted
+    End Function
+End Class
+
+''' Typed preferences bound to one caller-selected settings store.
+Public Class FormattingPreferences
+    Private Property mSettings As Settings
+    Public Sub Constructor(store As SettingsStore)
+        mSettings = New Settings(New FormattingSettingsSchema(), store, New SettingsMigration())
+    End Sub
+    Public Property Store As Settings
+        Get
+            Return mSettings
+        End Get
+    End Property
+    Public Function Profile() As FormatProfile
+        If mSettings.IsFuture() Then Throw New InvalidArgumentException("Future formatting profile is read-only")
+        Dim values As Array Of SettingsPair = []
+        For Each rule As SettingsRule In FormattingRules()
+            Array.Append(values, New SettingsPair(rule.Key(), mSettings.Get(rule.Key())))
+        Next
+        Return FormattingResolved(values)
+    End Function
+    Public Function Snapshot() As String
+        Dim profile As FormatProfile = Me.Profile()
+        Dim values As Array Of SettingsPair = []
+        For Each rule As SettingsRule In FormattingRules()
+            Dim value As String = mSettings.Get(rule.Key())
+            ' Capture resolved conventions. Changes in host locale cannot reinterpret
+            ' a draft whose next operation reuses this immutable snapshot.
+            Select Case rule.Key()
+            Case "number.preset"
+                value = "invariant"
+            Case "number.decimal"
+                value = profile.DecimalSeparator
+            Case "number.separator"
+                value = profile.GroupingSeparator
+            Case "number.primary"
+                value = String.From(profile.PrimaryGroup)
+            Case "number.secondary"
+                value = String.From(profile.SecondaryGroup)
+            Case "number.grouping"
+                value = "false"
+                If profile.Grouping Then value = "true"
+            End Select
+            Array.Append(values, New SettingsPair(rule.Key(), value))
+        Next
+        Return SettingsWire.Encode(1, mSettings.Revision(), values)
+    End Function
+End Class
+
+Public Function FormattingProfileFromSnapshot(snapshot As String) As FormatProfile
+    Dim memory As New SettingsMemoryStore()
+    If snapshot <> "" Then memory.Save("", snapshot)
+    Dim preferences As New FormattingPreferences(memory)
+    Return preferences.Profile()
+End Function
+
+''' Canonical values are invariant strings; a profile snapshot is captured per edit.
+Public Class FormattingFieldCodec Implements FieldCodec
+    Private Property mKind As String
+    Private Property mSnapshot As String
+    Private Property mProfile As FormatProfile
+    Public Sub Constructor(kind As String)
+        If Not SettingsWire.ContainsExact(["integer", "number", "money", "percent-ratio", "percent-points", "date", "time", "duration"], kind) Then Throw New InvalidArgumentException("Unknown field kind")
+        mKind = kind
+    End Sub
+    Private Function Resolved(snapshot As String) As FormatProfile
+        If Not (mProfile Is Nil) Then
+            If SettingsWire.Equal(mSnapshot, snapshot) Then Return mProfile
+        End If
+        Dim profile As FormatProfile = FormattingProfileFromSnapshot(snapshot)
+        mSnapshot = snapshot
+        mProfile = profile
+        Return profile
+    End Function
+    Private Function NumericAnalysis(text As String, codec As NumericCodec) As FormatAnalysis
+        Select Case mKind
+        Case "integer"
+            Return codec.AnalyzeInteger(text)
+        Case "money"
+            Return codec.AnalyzeMoney(text)
+        Case "percent-ratio"
+            Return codec.AnalyzePercentRatio(text)
+        Case "percent-points"
+            Return codec.AnalyzePercentPoints(text)
+        End Select
+        Return codec.AnalyzeNumber(text)
+    End Function
+    Public Function Analyze(text As String, snapshot As String) As FieldAnalysis
+        Dim profile As FormatProfile = Resolved(snapshot)
+        Dim state As FieldState = FieldState.Invalid
+        Dim code As String
+        Dim position As Integer
+        Dim canonical As Optional Of String = None
+        If mKind = "date" Or mKind = "time" Or mKind = "duration" Then
+            Dim entry As TemporalEntry
+            If mKind = "date" Then
+                entry = AnalyzeTemporalDate(text, profile.DatePattern)
+            ElseIf mKind = "time" Then
+                entry = AnalyzeTemporalTime(text, profile.TimeEditPattern)
+            Else
+                entry = AnalyzeTemporalDuration(text)
+            End If
+            Select Case entry.State
+            Case "Empty"
+                state = FieldState.Empty
+            Case "Incomplete"
+                state = FieldState.Incomplete
+            Case "Valid"
+                state = FieldState.Valid
+                If mKind = "date" Then canonical = Some(entry.DateValue.ToInvariant())
+                If mKind = "time" Then canonical = Some(entry.TimeValue.ToInvariant())
+                If mKind = "duration" Then canonical = Some(entry.DurationValue.ToInvariant())
+            End Select
+            code = entry.ErrorCode
+            position = entry.Position
+        Else
+            Dim codec As New NumericCodec(profile)
+            Dim entry As FormatAnalysis = NumericAnalysis(text, codec)
+            Select Case entry.State
+            Case FormatState.Empty
+                state = FieldState.Empty
+            Case FormatState.Incomplete
+                state = FieldState.Incomplete
+            Case FormatState.Valid
+                state = FieldState.Valid
+                Select Case mKind
+                Case "integer"
+                    canonical = Some(codec.IntegerInvariant(entry.IntegerValue))
+                Case "money"
+                    canonical = Some(codec.MoneyInvariant(entry.MoneyValue))
+                Case Else
+                    canonical = Some(codec.NumberInvariant(entry.NumberValue))
+                End Select
+            End Select
+            code = entry.Code
+            position = entry.Position
+        End If
+        Return New FieldAnalysis(state, canonical, code, position)
+    End Function
+    Private Function Render(canonical As String, snapshot As String, editing As Boolean) As String
+        Dim profile As FormatProfile = Resolved(snapshot)
+        Select Case mKind
+        Case "date"
+            Return FormatTemporalDate(RequireTemporalDate(canonical), profile.DatePattern)
+        Case "time"
+            If editing Then Return FormatTemporalTime(RequireTemporalTime(canonical), profile.TimeEditPattern)
+            Return FormatTemporalTimeDisplay(RequireTemporalTime(canonical), profile.TimePattern)
+        Case "duration"
+            Return RequireTemporalDuration(canonical).ToInvariant()
+        End Select
+        Dim codec As New NumericCodec(profile)
+        Dim invariant As New NumericCodec(New FormatProfile())
+        Dim entry As FormatAnalysis
+        If mKind = "integer" Then
+            entry = invariant.AnalyzeInteger(canonical)
+        ElseIf mKind = "money" Then
+            Dim moneyText As String = "USD " + canonical
+            If String.StartsWith(canonical, "-") Then moneyText = "-USD " + String.Substring(canonical, 1)
+            entry = invariant.AnalyzeMoney(moneyText)
+        Else
+            entry = invariant.AnalyzeNumber(canonical)
+        End If
+        If entry.State <> FormatState.Valid Then Throw New InvalidArgumentException("Invalid invariant field value")
+        Select Case mKind
+        Case "integer"
+            If editing Then Return codec.IntegerEdit(entry.IntegerValue)
+            Return codec.IntegerDisplay(entry.IntegerValue)
+        Case "money"
+            If editing Then Return codec.MoneyEdit(entry.MoneyValue)
+            Return codec.MoneyDisplay(entry.MoneyValue)
+        Case "percent-ratio"
+            If editing Then Return codec.PercentRatioEdit(entry.NumberValue)
+            Return codec.PercentRatioDisplay(entry.NumberValue)
+        Case "percent-points"
+            If editing Then Return codec.PercentPointsEdit(entry.NumberValue)
+            Return codec.PercentPointsDisplay(entry.NumberValue)
+        End Select
+        If editing Then Return codec.NumberEdit(entry.NumberValue)
+        Return codec.NumberDisplay(entry.NumberValue)
+    End Function
+    Public Function FormatDisplay(canonical As String, profile As String) As String
+        Return Render(canonical, profile, False)
+    End Function
+    Public Function FormatEdit(canonical As String, profile As String) As String
+        Return Render(canonical, profile, True)
+    End Function
+End Class

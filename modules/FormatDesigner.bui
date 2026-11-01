@@ -1,0 +1,178 @@
+Import formatcontrols
+Import FieldKit
+Import maskkit
+
+Private Class UnmaskedTextCodec Implements FieldCodec
+    Public Function Analyze(text As String, profile As String) As FieldAnalysis
+        If text = "" Then Return New FieldAnalysis(FieldState.Empty, None)
+        Return New FieldAnalysis(FieldState.Valid, Some(text))
+    End Function
+    Public Function FormatDisplay(canonical As String, profile As String) As String
+        Return canonical
+    End Function
+    Public Function FormatEdit(canonical As String, profile As String) As String
+        Return canonical
+    End Function
+End Class
+
+Private Class BoundedMaskCodec Implements FieldCodec
+    Private Property mCodec As MaskedFieldCodec
+    Public Sub Constructor(pattern As String, raw As Boolean)
+        mCodec = New MaskedFieldCodec(pattern, raw)
+    End Sub
+    Public Function Analyze(text As String, profile As String) As FieldAnalysis
+        Try
+            Return mCodec.Analyze(text, profile)
+        Catch error As InvalidArgumentException
+            Return New FieldAnalysis(FieldState.Invalid, None, "input-limit")
+        End Try
+    End Function
+    Public Function FormatDisplay(canonical As String, profile As String) As String
+        Return mCodec.FormatDisplay(canonical, profile)
+    End Function
+    Public Function FormatEdit(canonical As String, profile As String) As String
+        Return mCodec.FormatEdit(canonical, profile)
+    End Function
+End Class
+
+@ControlSize(260, 30)
+''' Parameterless native field for declarative layouts. Value is canonical raw text.
+Public Class MaskedTextField Inherits TextField
+    Private Property mPattern As String
+    Private Property mRaw As Boolean = True
+    Private Property mAllowsEmpty As Boolean = True
+    Private Property mSession As EditSession
+    Private Property mExplicitUnset As Boolean
+    Event ValueCommitted()
+    Event CommitRejected()
+
+    Public Sub Constructor()
+        Super.Constructor(FieldType.Normal)
+        mSession = New EditSession(New UnmaskedTextCodec(), True)
+    End Sub
+
+    Private Function Codec(pattern As String, raw As Boolean) As FieldCodec
+        If pattern = "" Then Return New UnmaskedTextCodec()
+        Return New BoundedMaskCodec(pattern, raw)
+    End Function
+
+    Private Function Canonical(pattern As String, rawValue As String) As String
+        If pattern = "" Then Return rawValue
+        If Me.ConstantPattern(pattern) Then
+            If rawValue <> "" Then Throw New InvalidArgumentException("A literal-only mask requires an empty raw Value")
+            Return ""
+        End If
+        Dim codec As New MaskedFieldCodec(pattern, True)
+        Dim analysis As FieldAnalysis = codec.Analyze(rawValue, "")
+        If analysis.State <> FieldState.Valid Then Throw New InvalidArgumentException("Value must contain complete raw mask characters")
+        Return analysis.Candidate.Value
+    End Function
+
+    Private Function ConstantPattern(pattern As String) As Boolean
+        If pattern = "" Then Return False
+        Dim mask As New TextMask(pattern)
+        Return mask.SlotCount = 0
+    End Function
+
+    Private Sub Configure(pattern As String, raw As Boolean, allowsEmpty As Boolean)
+        If String.Compare(pattern, mPattern, True) = 0 And raw = mRaw And allowsEmpty = mAllowsEmpty Then Return
+        If mSession.IsEditing Then Throw New InvalidArgumentException("Commit or cancel editing before changing mask settings")
+        Dim nextSession As New EditSession(Me.Codec(pattern, raw), allowsEmpty)
+        ' Validate with a fresh session before publishing any configuration changes.
+        If mSession.CommittedValue.HasValue Then nextSession.SetValue(Some(Me.Canonical(pattern, mSession.CommittedValue.Value)), "")
+        If Not mSession.CommittedValue.HasValue And Not mExplicitUnset And Me.ConstantPattern(pattern) Then nextSession.SetValue(Some(""), "")
+        mPattern = pattern
+        mRaw = raw
+        mAllowsEmpty = allowsEmpty
+        mSession = nextSession
+        Me.Text = nextSession.DisplayText
+    End Sub
+
+    Public Property MaskPattern As String
+        Get
+            Return mPattern
+        End Get
+        Set
+            Me.Configure(value, mRaw, mAllowsEmpty)
+        End Set
+    End Property
+    Public Property RawInput As Boolean
+        Get
+            Return mRaw
+        End Get
+        Set
+            Me.Configure(mPattern, value, mAllowsEmpty)
+        End Set
+    End Property
+    Public Property AllowsEmpty As Boolean
+        Get
+            Return mAllowsEmpty
+        End Get
+        Set
+            Me.Configure(mPattern, mRaw, value)
+        End Set
+    End Property
+    Public Property Value As String
+        Get
+            Return mSession.CommittedValue.Or("")
+        End Get
+        Set
+            If mSession.IsEditing Then Throw New InvalidArgumentException("Commit or cancel editing before assigning Value")
+            Me.ReplaceValue(value)
+        End Set
+    End Property
+    ''' Explicit record replacement: validate first, then discard any active draft.
+    Public Sub ReplaceValue(rawValue As String)
+        Dim nextSession As New EditSession(Me.Codec(mPattern, mRaw), mAllowsEmpty)
+        If rawValue <> "" Or Me.ConstantPattern(mPattern) Then nextSession.SetValue(Some(Me.Canonical(mPattern, rawValue)), "")
+        mSession = nextSession
+        mExplicitUnset = False
+        Me.Text = nextSession.DisplayText
+    End Sub
+    Public Sub ClearValue()
+        If mSession.IsEditing Then Throw New InvalidArgumentException("Commit or cancel editing before clearing Value")
+        mSession = New EditSession(Me.Codec(mPattern, mRaw), mAllowsEmpty)
+        mExplicitUnset = True
+        Me.Text = ""
+    End Sub
+    Public Property Session As EditSession
+        Get
+            Return mSession
+        End Get
+    End Property
+    Public Sub CancelEdit()
+        mSession.CancelEdit()
+        Me.Text = mSession.DisplayText
+    End Sub
+    Public Function TryCommit() As Boolean
+        If Not mSession.IsEditing Then
+            Dim unchanged As Boolean = String.Compare(Me.Text, mSession.DisplayText, True) = 0
+            mSession.BeginEdit("")
+            If unchanged Then Me.Text = mSession.DraftText
+        End If
+        mSession.SetDraft(Me.Text)
+        If Not mSession.TryCommit() Then
+            RaiseEvent CommitRejected()
+            Return False
+        End If
+        Me.Text = mSession.DisplayText
+        mExplicitUnset = Not mSession.CommittedValue.HasValue
+        RaiseEvent ValueCommitted()
+        Return True
+    End Function
+    Handle FocusGained()
+        If mSession Is Nil Then Return
+        mSession.BeginEdit("")
+        Me.Text = mSession.DraftText
+    End Handle
+    Handle TextChanged()
+        If mSession Is Nil Then Return
+        If Not mSession.IsEditing Then mSession.BeginEdit("")
+        mSession.SetDraft(Me.Text)
+    End Handle
+    Handle FocusLost()
+        If mSession Is Nil Then Return
+        If Not mSession.IsEditing Then Return
+        Dim accepted As Boolean = Me.TryCommit()
+    End Handle
+End Class
