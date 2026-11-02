@@ -88,5 +88,3 @@ there is no automatic native reload or merge.
 
 Native fields must be used on the UI thread. Session/settings/codec instances
 are unsynchronized and must each be confined to one thread.
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.

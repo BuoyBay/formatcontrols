@@ -1,6 +1,6 @@
-# Persist formatting profiles for native numeric and date fields
+# Persist formatting profiles for TextField-based numeric and date fields
 
-Connects FormatKit, TemporalKit, SettingsKit and FieldKit. The numeric engines,
+Connects FormatKit, TemporalKit, SettingsKit and FieldKit with TextField-based masked fields. The numeric engines,
 temporal values and settings stores remain independently usable.
 
 `FormattingPreferences(store)` exposes `Store` (the underlying transactional
@@ -44,7 +44,6 @@ On your own machine, install Buoy and run:
 buoy ai init --both
 ```
 
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 
