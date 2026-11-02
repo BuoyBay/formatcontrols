@@ -1,1 +1,1 @@
-{"schema":1,"name":"formatcontrols","version":"0.1.0","description":"Persisted formatting profiles and numeric/temporal native field codecs"}
+{"schema":1,"name":"formatcontrols","version":"0.1.0","description":"Persist formatting profiles for TextField-based numeric and date fields"}
