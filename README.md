@@ -1,4 +1,4 @@
-# Format profiles for TextField numeric and date fields
+# Numeric and date TextField profiles
 
 Connects FormatKit, TemporalKit, SettingsKit and FieldKit with TextField-based masked fields. The numeric engines,
 temporal values and settings stores remain independently usable.
